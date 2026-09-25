@@ -1,0 +1,33 @@
+# secrets / environment
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+coverage/
+
+# node / frontend
+node_modules/
+frontend/dist/
+
+# build output
+build/
+dist/
+build_pyi/
+build_package/
+*.egg-info/
+
+# editors / OS
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
+
+# local scratch
+_desktop.log

@@ -1,0 +1,3 @@
+# Build/packaging tools only — never imported by the application itself.
+-r requirements.txt
+pyinstaller

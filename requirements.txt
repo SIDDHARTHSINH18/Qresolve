@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+qiskit
+cirq-core  # second executable runtime; minimal Cirq (no vendor/cloud extras)
+pennylane  # third executable runtime; includes built-in default.qubit/lightning.qubit simulators
+pytest
+httpx
