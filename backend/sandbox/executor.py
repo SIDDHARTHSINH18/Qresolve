@@ -3,7 +3,8 @@
 Runs Python code in a fresh interpreter process with:
 - an isolated temp working directory (deleted afterwards)
 - a scrubbed environment (no application secrets, no PYTHON*/env injection)
-- CPython isolated mode (`-I`: ignores env vars and user site-packages)
+- CPython isolated mode (`-I`: ignores env vars and user site-packages) plus `-B`:
+  no bytecode cache is ever written, not even into the packaged interpreter
 - hard timeout and output truncation
 """
 from __future__ import annotations
@@ -42,6 +43,38 @@ _ENV_ALLOWLIST = [
     "OS",
 ]
 
+# The windowed desktop exe must never flash a console when it runs a sandbox
+# child or any helper executable.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+# Popen handles of sandbox children started by THIS process. Shutdown code may
+# only ever touch children listed here — never a name-based taskkill.
+_ACTIVE_CHILDREN: set[subprocess.Popen] = set()
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """terminate -> wait -> force only if it refuses to stop (owned child only)."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def terminate_active_children() -> int:
+    """Stop every sandbox child this process still owns. Returns how many.
+
+    Used by the desktop launcher before exiting so a windowed QResolve never
+    orphans an interpreter running user quantum code on a closed port.
+    """
+    children = list(_ACTIVE_CHILDREN)
+    _ACTIVE_CHILDREN.clear()
+    for proc in children:
+        _reap(proc)
+    return len(children)
+
 
 @dataclass
 class SandboxResult:
@@ -61,9 +94,25 @@ class SandboxResult:
 
 def _clean_env() -> dict[str, str]:
     env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    # -I mode ignores PYTHON* variables, so this only documents the intent; the
+    # effective switch is the -B flag on the command line in run_code/run_files.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     return env
+
+
+def _drop_workdir(workdir: str) -> None:
+    """Remove the temp dir, retrying while a killed child still holds it.
+
+    A sandbox process keeps the workdir as its cwd, so on Windows the last rmtree
+    of a run that was terminated during shutdown can fail on the directory alone
+    and leave an empty folder behind.
+    """
+    for _ in range(10):
+        shutil.rmtree(workdir, ignore_errors=True)
+        if not os.path.isdir(workdir):
+            return
+        time.sleep(0.2)
 
 
 def _interpreter() -> str:
@@ -87,25 +136,27 @@ def _run_cmd(
 ) -> SandboxResult:
     started = time.perf_counter()
     timed_out = False
+    proc = subprocess.Popen(
+        cmd,
+        cwd=workdir,
+        env=_clean_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=_NO_WINDOW,
+    )
+    _ACTIVE_CHILDREN.add(proc)
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=workdir,
-            env=_clean_env(),
-            capture_output=True,
-            timeout=limits.timeout_s,
-        )
-        exit_code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
+        try:
+            stdout, stderr = proc.communicate(timeout=limits.timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _reap(proc)
+            stdout, stderr = proc.communicate()
+            stderr = (stderr or b"") + b"\n[Sandbox] Execution timed out after %.1fs" % limits.timeout_s
+        exit_code = None if timed_out else proc.returncode
         success = exit_code == 0
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = None
-        stdout = exc.stdout or b""
-        stderr = exc.stderr or b""
-        stderr += b"\n[Sandbox] Execution timed out after %.1fs" % limits.timeout_s
-        success = False
+    finally:
+        _ACTIVE_CHILDREN.discard(proc)
 
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -149,7 +200,7 @@ def run_python_code(
             f.write(code)
 
         result = _run_cmd(
-            [_interpreter(), "-I", script_name],
+            [_interpreter(), "-I", "-B", script_name],
             workdir,
             limits,
         )
@@ -161,7 +212,7 @@ def run_python_code(
                     result.files[name] = f.read()
         return result
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        _drop_workdir(workdir)
 
 
 def run_files(
@@ -180,7 +231,7 @@ def run_files(
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
 
-        result = _run_cmd([_interpreter(), "-I", entry], workdir, limits)
+        result = _run_cmd([_interpreter(), "-I", "-B", entry], workdir, limits)
         result.workdir = workdir
         for name in collect_files or []:
             path = os.path.join(workdir, name)
@@ -189,4 +240,4 @@ def run_files(
                     result.files[name] = f.read()
         return result
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        _drop_workdir(workdir)

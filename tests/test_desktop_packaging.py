@@ -4,9 +4,19 @@ The packaged app pins the sandbox interpreter via QRESOLVE_SANDBOX_PYTHON
 (frozen builds) — these tests lock in that the mechanism cannot leak into
 executed user code and cannot be hijacked by a nonexistent path.
 """
+import os
+import subprocess
 import sys
+from pathlib import Path
 
-from backend.sandbox.executor import _ENV_ALLOWLIST, _interpreter
+import pytest
+
+from backend.sandbox.executor import (
+    _ACTIVE_CHILDREN,
+    _ENV_ALLOWLIST,
+    _interpreter,
+    terminate_active_children,
+)
 
 
 def test_no_qresolve_variables_reach_the_sandbox_environment():
@@ -29,8 +39,251 @@ def test_pinned_interpreter_is_used_only_when_it_exists(monkeypatch, tmp_path):
 def test_frontend_is_served_same_origin_by_design():
     """The desktop app mounts the built UI on the API port; the frontend API
     layer uses same-origin relative paths, so no host is hard-wired."""
-    import pathlib
-
-    src = pathlib.Path(__file__).resolve().parents[1] / "frontend" / "src" / "api" / "qresolve.js"
+    src = Path(__file__).resolve().parents[1] / "frontend" / "src" / "api" / "qresolve.js"
     text = src.read_text(encoding="utf-8")
     assert "8000" not in text and "localhost" not in text
+
+
+# --- M6: windowed packaging contract -----------------------------------------
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_pyinstaller_spec_builds_a_windowed_app():
+    """M6 §1: console=False — a CMD window must never exist at all."""
+    text = (ROOT / "QResolve.spec").read_text(encoding="utf-8")
+    assert "console=False" in text
+    assert "console=True" not in text
+
+
+def test_sandbox_children_launch_without_console_windows():
+    """A GUI-subsystem parent flashing a console per sandbox run would defeat §1."""
+    if os.name != "nt":
+        pytest.skip("Windows-only console suppression flag")
+    from backend.sandbox import executor
+
+    assert executor._NO_WINDOW == subprocess.CREATE_NO_WINDOW
+
+
+def test_terminate_active_children_only_touches_owned_processes():
+    class FakeProc:
+        def __init__(self, alive=True):
+            self._alive = alive
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return None if self._alive else 0
+
+        def terminate(self):
+            self.terminated = True
+            self._alive = False
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    a, b = FakeProc(), FakeProc()
+    _ACTIVE_CHILDREN.update({a, b})
+    assert terminate_active_children() == 2
+    assert a.terminated and b.terminated
+    assert not _ACTIVE_CHILDREN
+
+
+def test_terminate_active_children_forces_only_when_terminate_fails():
+    class _Stubborn:
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=0)
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    s = _Stubborn()
+    _ACTIVE_CHILDREN.add(s)
+    terminate_active_children()
+    assert s.terminated and s.killed
+    assert not _ACTIVE_CHILDREN
+
+
+def test_launcher_phase_order_matches_the_startup_state_machine():
+    import desktop.qresolve_desktop as d
+
+    assert d.PHASES == (
+        "STARTING", "CHECK PORT", "PORT AVAILABLE", "START BACKEND",
+        "WAIT FOR HEALTH", "HEALTHY", "OPEN UI", "RUNNING",
+    )
+
+
+def test_port_conflict_path_reports_the_spec_error(monkeypatch):
+    """M6 §4: GUI error 'QResolve could not start' + close-the-app guidance."""
+    import backend.ports as ports
+    import desktop.qresolve_desktop as d
+
+    def _boom(port, host=ports.BACKEND_HOST):
+        raise ports.PortConflictError(
+            f"Port {port} is already being used by another application.\n"
+            "Close the application using this port and try again.\n"
+            "QResolve never switches ports silently."
+        )
+
+    monkeypatch.setattr(ports, "ensure_port_free", _boom)
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(d, "_show_dialog", lambda t, m: shown.append((t, m)))
+    assert d.main() == 1
+    assert shown == [(
+        "QResolve could not start",
+        "Port 8321 is already being used by another application.\n"
+        "Close the application using this port and try again.\n"
+        "QResolve never switches ports silently.",
+    )]
+
+
+# --- M7: installed-application contract --------------------------------------
+
+def test_startup_crash_log_goes_to_the_per_user_location(monkeypatch, tmp_path):
+    """M7 §6: an installed app lives in a protected directory, so the one file
+    the launcher writes must resolve under the per-user app-data root."""
+    import desktop.qresolve_desktop as d
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert d._crash_log_path() == str(
+        tmp_path / "QResolve" / "QResolve-startup-error.log"
+    )
+
+
+def test_nothing_is_written_next_to_the_executable():
+    """Reads may resolve beside the exe (locating `_python`); writes may not."""
+    text = (ROOT / "desktop" / "qresolve_desktop.py").read_text(encoding="utf-8")
+    before_helper = text.split("def _crash_log_path")[0]
+    assert "QResolve-startup-error.log" not in before_helper
+    assert "QResolve-startup-error.log" in text.split("def _crash_log_path")[1]
+
+
+# --- M7: installer contract ---------------------------------------------------
+
+def test_installer_is_update_ready_and_free_of_developer_paths():
+    """M7 §5/§10: a fixed AppId makes the next Setup.exe an in-place upgrade,
+    and nothing may pin the application to the machine that built it."""
+    import re
+
+    iss = (ROOT / "installer" / "QResolve.iss").read_text(encoding="utf-8")
+    # Inno escapes a literal "{" as "{{"; the closing brace stays single.
+    assert re.search(r"^AppId=\{\{[0-9A-Fa-f-]{36}\}$", iss, re.MULTILINE)
+    assert "DefaultDirName={autopf}\\{#MyAppName}" in iss
+    assert '"{autoprograms}\\{#MyAppName}"' in iss
+    assert '"{autodesktop}\\{#MyAppName}"' in iss
+    assert "UninstallDisplayIcon={app}\\{#MyAppExeName}" in iss
+    assert "C:\\Users\\" not in iss and "Downloads" not in iss
+
+
+def test_installer_ships_the_exe_its_ui_bundle_and_its_interpreter():
+    iss = (ROOT / "installer" / "QResolve.iss").read_text(encoding="utf-8")
+    for needed in ("_internal\\*", "_python\\*", "QResolve.exe"):
+        assert needed in iss, f"{needed} would not be installed"
+
+
+def test_installer_keeps_the_pyi_and_interpreter_directories_nested():
+    """A tree wildcard must not land directly in {app}.
+
+    Inno flattens the *contents* of a wildcard Source into DestDir, so
+    "src\\_internal\\* -> {app}" would drop base_library.zip, web\\ and
+    _tkinter.pyd next to QResolve.exe - and collide with the same filenames
+    coming from _python. PyInstaller only finds its payload in _internal.
+    """
+    import re
+
+    iss = (ROOT / "installer" / "QResolve.iss").read_text(encoding="utf-8")
+    files = iss.split("[Files]")[1].split("\n[")[0]
+    for source, dest in re.findall(
+        r'^Source:\s*"([^"]+)"\s*;\s*DestDir:\s*"([^"]+)"', files, re.MULTILINE
+    ):
+        if source.endswith("\\*"):
+            tail = source.rsplit("\\", 2)[-2]
+            assert dest == f"{{app}}\\{tail}", f"{source} would be flattened into {dest}"
+
+
+def test_installer_prunes_the_managed_trees_before_copying():
+    """Updates must not leave the previous build's modules behind.
+
+    A frozen payload is replaced as a whole; stale files in _internal or _python
+    would be imported instead of the new ones.
+    """
+    iss = (ROOT / "installer" / "QResolve.iss").read_text(encoding="utf-8")
+    prune = iss.split("[InstallDelete]")[1].split("\n[")[0]
+    for tree in ("{app}\\_internal", "{app}\\_python"):
+        assert f'Type: filesandordirs; Name: "{tree}"' in prune, f"{tree} is not pruned"
+
+
+def test_shipped_interpreter_carries_no_bytecode_caches():
+    """A .pyc embeds the absolute path it was built from.
+
+    Shipping them would publish the developer's directory layout inside the
+    installed application, so they are stripped from the packaged interpreter.
+    """
+    interpreter = ROOT / "build_package" / "_python"
+    assert interpreter.is_dir(), "embedded interpreter not packaged yet"
+    stale = [p for p in interpreter.rglob("*.pyc")]
+    assert not stale, f"{len(stale)} compiled files would leak their build paths"
+
+
+def test_sandbox_child_never_writes_bytecode():
+    """Only the -B flag stops .pyc output: -I mode ignores PYTHON* variables.
+
+    Without it a packaged run caches bytecode beside its own modules, i.e.
+    inside the installation directory - which is read-only in Program Files, and
+    would publish the developer's paths either way.
+    """
+    from backend.sandbox.executor import SandboxLimits, run_python_code
+
+    result = run_python_code(
+        "import sys\nprint('DONT_WRITE_BYTECODE=' + str(sys.dont_write_bytecode))\n",
+        limits=SandboxLimits(timeout_s=30),
+    )
+    assert result.success, result.stderr
+    assert "DONT_WRITE_BYTECODE=True" in result.stdout
+
+
+def test_sandbox_workdir_is_gone_after_a_run():
+    import os
+
+    from backend.sandbox.executor import SandboxLimits, run_python_code
+
+    result = run_python_code("print('ok')\n", limits=SandboxLimits(timeout_s=30))
+    assert result.success, result.stderr
+    assert result.workdir
+    assert not os.path.isdir(result.workdir), f"{result.workdir} survived the run"
+
+
+def test_installer_version_tracks_the_application_version():
+    import re
+
+    from backend.main import app
+
+    iss = (ROOT / "installer" / "QResolve.iss").read_text(encoding="utf-8")
+    declared = re.search(r'#define MyAppVersion "([^"]+)"', iss).group(1)
+    assert declared == app.version
+
+
+def test_version_resource_matches_the_application_version():
+    from backend.main import app
+
+    txt = (ROOT / "installer" / "version_info.txt").read_text(encoding="utf-8")
+    parts = tuple(int(n) for n in app.version.split(".")) + (0,)
+    assert f"filevers={parts}" in txt
+    assert f"prodvers={parts}" in txt
+    assert f"'FileVersion', '{app.version}'" in txt
+    assert f"'ProductVersion', '{app.version}'" in txt

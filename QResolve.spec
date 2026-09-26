@@ -1,9 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build spec for the QResolve desktop application.
 
-Build from the repository root:  pyinstaller QResolve.spec
-Output: dist/QResolve/QResolve.exe + _internal/ (ship _python/ next to it
-for the sandboxed user-code interpreter; see desktop/qresolve_desktop.py).
+Dev build   (repository root):  pyinstaller --noconfirm QResolve.spec
+Installer build:               pyinstaller --noconfirm --distpath dist/install \\
+                               --workpath build/install QResolve.spec
+Both emit <dist>/QResolve/QResolve.exe + _internal/.
+
+`_python/` (the embedded interpreter for sandboxed user code) is NOT produced
+by this spec — COLLECT wipes its output directory, so it must be copied in
+after every build:  cp -r build_package/_python <dist>/QResolve/_python
+See desktop/qresolve_desktop.py:_bundled_python().
 """
 from PyInstaller.utils.hooks import collect_all
 
@@ -43,7 +49,8 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,  # M6: windowed app — no CMD window, ever (tkinter control UI + browser UI)
+    version="installer/version_info.txt",  # M7: PE ProductName/FileVersion metadata
 )
 
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="QResolve")
