@@ -248,7 +248,12 @@ def main() -> int:
 
 
 def _run_gui(events: queue.Queue, base: str, shutdown) -> int:
-    """Tkinter control window + event pump. Returns the process exit code."""
+    """Tkinter status window + event pump. Returns the process exit code.
+
+    Passive on purpose: _readiness() already opens the UI in the browser once
+    the backend is healthy, so this window only reports progress and remains
+    the single quit affordance — closing it shuts QResolve down.
+    """
     import tkinter
     from tkinter import messagebox
 
@@ -262,14 +267,6 @@ def _run_gui(events: queue.Queue, base: str, shutdown) -> int:
     tkinter.Label(root, text="QResolve — quantum code debugger",
                   font=("Segoe UI", 11, "bold")).pack(pady=(18, 4))
     tkinter.Label(root, textvariable=status, wraplength=420, justify="left").pack(pady=2)
-    row = tkinter.Frame(root)
-    row.pack(pady=12)
-
-    def _open_ui() -> None:
-        webbrowser.open(base + "/")
-
-    tkinter.Button(row, text="Open interface", command=_open_ui).pack(side="left", padx=6)
-    tkinter.Button(row, text="Quit", command=root.destroy).pack(side="left", padx=6)
 
     def _pump() -> None:
         nonlocal exit_code

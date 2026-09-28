@@ -287,3 +287,188 @@ def test_version_resource_matches_the_application_version():
     assert f"prodvers={parts}" in txt
     assert f"'FileVersion', '{app.version}'" in txt
     assert f"'ProductVersion', '{app.version}'" in txt
+
+
+# --- the control window is a passive status display ---------------------------
+#
+# The browser is opened by _readiness() as soon as the backend is healthy, so a
+# second "Open interface" affordance only invites the user to launch duplicate
+# tabs. The window stays for one reason: closing it is how QResolve quits.
+# Nothing here opens a Tk display - _run_gui is driven through a stub module.
+
+LAUNCHER = ROOT / "desktop" / "qresolve_desktop.py"
+
+
+def _launcher_functions():
+    import ast
+
+    tree = ast.parse(LAUNCHER.read_text(encoding="utf-8"))
+    return {
+        n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+class _StubWidget:
+    """Records construction; every Tk method the launcher touches is inert."""
+
+    def __init__(self, built: list[str], kind: str):
+        self._built = built
+        self.kind = kind
+        built.append(kind)
+
+    def pack(self, *args, **kwargs) -> None:
+        return None
+
+
+class _StubRoot(_StubWidget):
+    def __init__(self, built, protocols, destroyed, pump_budget=8):
+        super().__init__(built, "Tk")
+        self._protocols = protocols
+        self._destroyed = destroyed
+        self._budget = pump_budget
+
+    def title(self, text) -> None:
+        return None
+
+    def geometry(self, spec) -> None:
+        return None
+
+    def resizable(self, *args) -> None:
+        return None
+
+    def protocol(self, name, handler) -> None:
+        self._protocols[name] = handler
+
+    def after(self, delay_ms, callback=None):
+        # No event loop exists here, so run the callback inline a bounded number
+        # of times: enough to drain the queue, never enough to spin forever.
+        if callback is not None and self._budget > 0:
+            self._budget -= 1
+            callback()
+
+    def destroy(self) -> None:
+        self._destroyed.append(True)
+
+    def mainloop(self) -> None:
+        return None
+
+
+class _StubVar:
+    def __init__(self, values, value=None):
+        self._values = values
+        values.append(value)
+
+    def set(self, value) -> None:
+        self._values.append(value)
+
+
+def _drive_run_gui(monkeypatch, events, base="http://127.0.0.1:8321"):
+    """Run _run_gui against a stub tkinter and report what it built."""
+    import queue
+    import types
+
+    import desktop.qresolve_desktop as d
+
+    built: list[str] = []
+    protocols: dict = {}
+    destroyed: list[bool] = []
+    statuses: list[str] = []
+    dialogs: list[tuple[str, str]] = []
+    shutdowns: list[int] = []
+
+    stub = types.ModuleType("tkinter")
+    stub.Tk = lambda: _StubRoot(built, protocols, destroyed)
+    stub.StringVar = lambda value=None: _StubVar(statuses, value)
+    stub.Label = lambda *a, **k: _StubWidget(built, "Label")
+    stub.Frame = lambda *a, **k: _StubWidget(built, "Frame")
+    stub.Button = lambda *a, **k: _StubWidget(built, "Button")
+    stub.messagebox = types.SimpleNamespace(
+        showerror=lambda title, message: dialogs.append((title, message))
+    )
+    monkeypatch.setitem(sys.modules, "tkinter", stub)
+    monkeypatch.setitem(sys.modules, "tkinter.messagebox", stub.messagebox)
+
+    exit_code = d._run_gui(events, base, lambda: shutdowns.append(1))
+    return {
+        "exit_code": exit_code,
+        "built": built,
+        "protocols": protocols,
+        "destroyed": destroyed,
+        "statuses": statuses,
+        "dialogs": dialogs,
+        "shutdowns": shutdowns,
+    }
+
+
+def test_control_window_builds_no_buttons(monkeypatch):
+    import queue
+
+    run = _drive_run_gui(monkeypatch, queue.Queue())
+    assert run["built"] == ["Tk", "Label", "Label"]
+    assert "Button" not in run["built"] and "Frame" not in run["built"]
+
+
+def test_control_window_has_no_button_in_its_source():
+    """Guards the same contract statically, so a rebuilt widget cannot slip in
+    through a code path the stub driver does not reach."""
+    import ast
+
+    source = ast.unparse(_launcher_functions()["_run_gui"])
+    assert "Button" not in source
+    assert "Open interface" not in source
+    assert ".pack(" in source and "textvariable=status" in source  # status label remains
+
+
+def test_running_phase_reports_the_url_and_how_to_quit(monkeypatch):
+    import queue
+
+    events = queue.Queue()
+    events.put(("phase", "WAIT FOR HEALTH"))
+    events.put(("phase", "RUNNING"))
+    run = _drive_run_gui(monkeypatch, events, base="http://127.0.0.1:8321")
+    assert run["exit_code"] == 0
+    assert run["statuses"][-1] == (
+        "Running at http://127.0.0.1:8321\nClose this window to quit QResolve."
+    )
+    assert run["shutdowns"] == [1]  # the backend is stopped when the window closes
+
+
+def test_closing_the_control_window_destroys_it(monkeypatch):
+    """WM_DELETE_WINDOW is the only quit affordance left, so it must be wired."""
+    import queue
+
+    run = _drive_run_gui(monkeypatch, queue.Queue())
+    assert list(run["protocols"]) == ["WM_DELETE_WINDOW"]
+    run["protocols"]["WM_DELETE_WINDOW"]()
+    assert run["destroyed"] == [True]
+
+
+def test_the_browser_is_opened_once_by_the_readiness_probe():
+    """Auto-opening the UI must survive the button removal, and must stay in the
+    one place that knows the backend answered /health."""
+    import ast
+
+    tree = ast.parse(LAUNCHER.read_text(encoding="utf-8"))
+    opens = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "open"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "webbrowser"
+    ]
+    assert len(opens) == 1, "the UI must be opened exactly once"
+
+    readiness = _nested_function(tree, "_readiness")
+    assert readiness.lineno <= opens[0].lineno <= readiness.end_lineno
+    assert "webbrowser" not in ast.unparse(_launcher_functions()["_run_gui"])
+
+
+def _nested_function(tree, name: str):
+    """Fetch a function defined inside another function (e.g. main._readiness)."""
+    import ast
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found")

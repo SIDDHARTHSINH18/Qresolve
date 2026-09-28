@@ -41,6 +41,17 @@ FIXED_CODE = (
     "print(c)\n"
 )
 
+# The same bug, but the qubit count comes from a variable: which LineQubit
+# indices are free cannot be proven from the source, so the deterministic
+# fixer must decline instead of guessing.
+UNPROVABLE_DUPLICATE_CODE = (
+    "import cirq\n"
+    "n = 2\n"
+    "q0, q1 = cirq.LineQubit.range(n)\n"
+    "c = cirq.Circuit(cirq.CNOT(q0, q0))\n"
+    "print(c)\n"
+)
+
 
 @pytest.fixture(scope="module")
 def runtime():
@@ -216,11 +227,50 @@ def test_validator_rejects_bad_ai_fix(runtime):
 
 
 @requires_cirq
-def test_no_provider_degrades_without_crash(runtime):
-    """Cirq has no heuristic auto-fixer; with no provider the controller must
-    stop cleanly with a structured 'unsolved' rather than crashing."""
+def test_end_to_end_solve_verifies_heuristic_fix_without_a_provider(runtime):
+    """The built-in Cirq example, with no AI provider configured at all:
+    reproduce -> deterministic patch -> real sandbox re-execution -> verified."""
     controller = AdaptiveController(runtime=runtime, provider=None)
     response = controller.solve(SolveRequest(code=BROKEN_CODE))
-    assert response.status == "unsolved"
+    assert response.execution.success is False          # the original really failed
     assert response.diagnosis.category == "cirq_duplicate_qids"
+    assert response.status == "solved"
+    assert len(response.attempts) == 1
+    assert response.attempts[0].source == "heuristic"
+    assert response.attempts[0].verified is True        # by re-execution, not by claim
+    assert response.verification.verified is True
+    assert response.verification.execution.success is True
+    patched = response.fix.patched_code
+    assert patched != BROKEN_CODE
+    assert "q2 = cirq.LineQubit(1)" in patched
+    assert "cirq.CNOT(q, q2)" in patched
+    # the verified patch is the one that ran: re-executing it must succeed again
+    assert runtime.execute(patched).success is True
+
+
+@requires_cirq
+def test_solve_pipeline_resolves_the_builtin_cirq_example(monkeypatch):
+    """Same contract through the pipeline the API endpoint calls, with no
+    provider reachable: the status a user sees must be 'solved'."""
+    from backend.api.solve import run_solve_pipeline
+
+    monkeypatch.setattr("backend.api.solve.get_provider_or_none", lambda: None)
+    response = run_solve_pipeline(SolveRequest(code=BROKEN_CODE))
+    assert response.framework.framework == "cirq"
+    assert response.status == "solved"
+    assert response.attempts[0].source == "heuristic"
+    assert response.verification.verified is True
+
+
+@requires_cirq
+def test_unprovable_duplicate_stays_unsolved_without_crash(runtime):
+    """When the fixer cannot prove which index is free it must propose nothing:
+    a clean, structured 'unsolved' rather than a guessed patch."""
+    assert runtime.execute(UNPROVABLE_DUPLICATE_CODE).success is False
+    controller = AdaptiveController(runtime=runtime, provider=None)
+    response = controller.solve(SolveRequest(code=UNPROVABLE_DUPLICATE_CODE))
+    assert response.diagnosis.category == "cirq_duplicate_qids"
+    assert response.status == "unsolved"
     assert response.fix is None
+    assert response.attempts == []          # nothing was proposed, so nothing ran
+    assert response.verification is None    # and nothing is claimed to be verified
