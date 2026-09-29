@@ -13,20 +13,8 @@ from backend.sandbox.limits import SandboxLimits
 
 class QiskitRuntime(QuantumRuntime):
     name = "qiskit"
-
-    def is_available(self) -> bool:
-        try:
-            import qiskit  # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    def version(self) -> str | None:
-        try:
-            import qiskit
-            return qiskit.__version__
-        except ImportError:
-            return None
+    probe_imports = ("qiskit",)
+    version_module = "qiskit"
 
     def execute(self, code: str, limits: SandboxLimits | None = None) -> ExecutionResult:
         return execute_in_sandbox(code, limits)

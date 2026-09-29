@@ -5,7 +5,11 @@ Runs Python code in a fresh interpreter process with:
 - a scrubbed environment (no application secrets, no PYTHON*/env injection)
 - CPython isolated mode (`-I`: ignores env vars and user site-packages) plus `-B`:
   no bytecode cache is ever written, not even into the packaged interpreter
+- `-X utf8`, because isolated mode also ignores PYTHONIOENCODING and circuit
+  diagrams printed by user code are not ASCII
 - hard timeout and output truncation
+- on Windows, a kernel job object that caps committed memory and per-process
+  CPU time and kills the whole child tree (see backend/sandbox/job.py)
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 
+from backend.sandbox.job import SandboxJob, limit_report
 from backend.sandbox.limits import SandboxLimits
 
 # Env vars the child is allowed to see. Everything else (API keys, tokens,
@@ -94,11 +99,17 @@ class SandboxResult:
 
 def _clean_env() -> dict[str, str]:
     env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
-    # -I mode ignores PYTHON* variables, so this only documents the intent; the
-    # effective switch is the -B flag on the command line in run_code/run_files.
+    # -I mode ignores every PYTHON* variable, so the child's text encoding is
+    # set by the -X utf8 command-line flag instead of PYTHONIOENCODING here;
+    # without that flag a circuit diagram printed by user code aborts with
+    # UnicodeEncodeError on a cp1252 console. -B keeps the intent explicit:
+    # no bytecode cache is written.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
     return env
+
+
+# Command-line interpreter options shared by every sandbox run.
+_INTERPRETER_FLAGS = ["-I", "-B", "-X", "utf8"]
 
 
 def _drop_workdir(workdir: str) -> None:
@@ -115,7 +126,7 @@ def _drop_workdir(workdir: str) -> None:
         time.sleep(0.2)
 
 
-def _interpreter() -> str:
+def sandbox_interpreter() -> str:
     """Python used to run sandboxed code.
 
     In a frozen desktop build, sys.executable is the app binary itself, so the
@@ -136,6 +147,11 @@ def _run_cmd(
 ) -> SandboxResult:
     started = time.perf_counter()
     timed_out = False
+    notes: list[str] = []
+    # Bounds memory/CPU in kernel and ties the whole child tree to this
+    # process; None means this platform or session refused, which is reported
+    # rather than assumed away.
+    job = SandboxJob.open(limits.max_memory_bytes, limits.cpu_limit_s)
     proc = subprocess.Popen(
         cmd,
         cwd=workdir,
@@ -146,17 +162,30 @@ def _run_cmd(
     )
     _ACTIVE_CHILDREN.add(proc)
     try:
+        if job is not None and not job.assign(proc.pid):
+            notes.append(
+                "[Sandbox] Memory and CPU limits were NOT enforced: this Windows "
+                "session refused a job object for the child."
+            )
         try:
             stdout, stderr = proc.communicate(timeout=limits.timeout_s)
         except subprocess.TimeoutExpired:
             timed_out = True
             _reap(proc)
+            if job is not None:
+                job.kill()  # anything the child spawned dies with it
             stdout, stderr = proc.communicate()
             stderr = (stderr or b"") + b"\n[Sandbox] Execution timed out after %.1fs" % limits.timeout_s
         exit_code = None if timed_out else proc.returncode
         success = exit_code == 0
+        if job is not None and not success and not timed_out:
+            stopped = limit_report(job, exit_code)
+            if stopped:
+                notes.append(f"[Sandbox] {stopped}")
     finally:
         _ACTIVE_CHILDREN.discard(proc)
+        if job is not None:
+            job.close()
 
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
@@ -169,6 +198,9 @@ def _run_cmd(
     if len(err_text) > limits.max_output_bytes:
         err_text = err_text[: limits.max_output_bytes]
         truncated = True
+    # Appended after truncation so the sandbox's own statement always survives.
+    for note in notes:
+        err_text = f"{err_text}\n{note}" if err_text.strip() else note
 
     return SandboxResult(
         success=success,
@@ -200,7 +232,7 @@ def run_python_code(
             f.write(code)
 
         result = _run_cmd(
-            [_interpreter(), "-I", "-B", script_name],
+            [sandbox_interpreter(), *_INTERPRETER_FLAGS, script_name],
             workdir,
             limits,
         )
@@ -231,7 +263,7 @@ def run_files(
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
 
-        result = _run_cmd([_interpreter(), "-I", "-B", entry], workdir, limits)
+        result = _run_cmd([sandbox_interpreter(), *_INTERPRETER_FLAGS, entry], workdir, limits)
         result.workdir = workdir
         for name in collect_files or []:
             path = os.path.join(workdir, name)

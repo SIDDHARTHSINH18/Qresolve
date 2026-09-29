@@ -36,6 +36,9 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
+    # backend.cli is deliberately NOT listed: this exe is console=False, so a
+    # command-line client could not be invoked from it. The CLI is the source
+    # checkout's interface to the same core the app serves over HTTP.
     excludes=["tkinter.tests", "pytest"],
     noarchive=False,
 )

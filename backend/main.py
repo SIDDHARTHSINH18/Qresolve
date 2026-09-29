@@ -5,7 +5,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import router
+from backend.api.routes import router
 
 app = FastAPI(
     title="QResolve",

@@ -14,7 +14,7 @@ import pytest
 from backend.sandbox.executor import (
     _ACTIVE_CHILDREN,
     _ENV_ALLOWLIST,
-    _interpreter,
+    sandbox_interpreter,
     terminate_active_children,
 )
 
@@ -25,15 +25,15 @@ def test_no_qresolve_variables_reach_the_sandbox_environment():
 
 def test_interpreter_defaults_to_current_python(monkeypatch):
     monkeypatch.delenv("QRESOLVE_SANDBOX_PYTHON", raising=False)
-    assert _interpreter() == sys.executable
+    assert sandbox_interpreter() == sys.executable
 
 
 def test_pinned_interpreter_is_used_only_when_it_exists(monkeypatch, tmp_path):
     real = sys.executable
     monkeypatch.setenv("QRESOLVE_SANDBOX_PYTHON", real)
-    assert _interpreter() == real
+    assert sandbox_interpreter() == real
     monkeypatch.setenv("QRESOLVE_SANDBOX_PYTHON", str(tmp_path / "nope" / "python.exe"))
-    assert _interpreter() == sys.executable  # stale pin must not break execution
+    assert sandbox_interpreter() == sys.executable  # stale pin must not break execution
 
 
 def test_frontend_is_served_same_origin_by_design():

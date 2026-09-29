@@ -22,6 +22,7 @@ from backend.models import (
 )
 from backend.runtimes import all_runtimes, get_runtime
 from backend.sandbox.limits import SandboxLimits
+from backend.validation import verify_execution
 
 router = APIRouter(prefix="/api")
 
@@ -85,16 +86,7 @@ def validate(req: VerifyRequest):
     runtime = get_runtime(name) if name else None
     if runtime is None:
         raise HTTPException(status_code=422, detail=f"No runtime available for framework: {name}")
-    execution = runtime.execute(req.code)
-    return Verification(
-        verified=execution.success,
-        execution=execution,
-        notes=(
-            "Code executed successfully in the sandbox."
-            if execution.success
-            else "Code failed at runtime."
-        ),
-    )
+    return verify_execution(runtime.execute(req.code))
 
 
 @router.post("/run")

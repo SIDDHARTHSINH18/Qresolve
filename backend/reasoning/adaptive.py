@@ -25,6 +25,7 @@ from backend.models import (
 )
 from backend.providers.base import AIProvider
 from backend.runtimes.base import QuantumRuntime
+from backend.sandbox.limits import SandboxLimits
 from backend.validation import verify_fix
 
 MAX_ATTEMPTS = 5
@@ -54,8 +55,12 @@ class AdaptiveController:
             framework_name = req.framework
         framework = FrameworkDetection(framework=framework_name, confidence=confidence, matched_patterns=matched)
 
+        # The request's timeout governs every sandbox run in this solve,
+        # including the verification of each candidate.
+        limits = SandboxLimits(timeout_s=req.timeout_seconds) if req.timeout_seconds else None
+
         # Runtime reproduction (the evidence source of truth)
-        execution = self.runtime.execute(req.code)
+        execution = self.runtime.execute(req.code, limits=limits)
         if not execution.success:
             error = error_from_execution(execution, req.code)
         elif req.error is not None:
@@ -127,7 +132,9 @@ class AdaptiveController:
                 level = min(MAX_LEVEL, level + 1)
                 continue
 
-            v = verify_fix(self.runtime, proposal.patched_code)
+            v = verify_fix(
+                self.runtime, proposal.patched_code, original=execution, limits=limits
+            )
             why_failed = None
             if v.verified:
                 verified_fix = ProposedFix(
@@ -163,6 +170,12 @@ class AdaptiveController:
                     "solved", framework, execution, error, diagnosis,
                     verified_fix, verification, attempts, level, None,
                 )
+
+            if v.state == "UNVERIFIED":
+                # The sandbox could not judge this correction at all; retrying
+                # other patches would only produce more unjudgeable runs.
+                stop_reason = f"Could not be verified: {v.reason}"
+                break
 
             # Failure-driven escalation: real evidence decides the new level.
             error = error_from_execution(v.execution, req.code) or error

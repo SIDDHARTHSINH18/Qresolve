@@ -92,21 +92,14 @@ def _map_error_positions(
 
 class OpenQasmRuntime(QuantumRuntime):
     name = "openqasm"
-
-    def is_available(self) -> bool:
-        try:
-            from qiskit import qasm2  # noqa: F401
-            from qiskit.providers.basic_provider import BasicSimulator  # noqa: F401
-        except ImportError:
-            return False
-        return True
+    probe_imports = ("qiskit.qasm2", "qiskit.providers.basic_provider")
+    version_module = "qiskit"
 
     def version(self) -> str | None:
-        try:
-            import qiskit
-        except ImportError:
+        qiskit_version = self._read_version()
+        if qiskit_version is None:
             return None
-        return f"OpenQASM 2.0 via qiskit {qiskit.__version__}"
+        return f"OpenQASM 2.0 via qiskit {qiskit_version}"
 
     def execute(self, code: str, limits: SandboxLimits | None = None) -> ExecutionResult:
         harness, load_line, version_raise_line = _build_harness(code)

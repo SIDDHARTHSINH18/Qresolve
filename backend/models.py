@@ -1,7 +1,7 @@
 """Shared Pydantic models for QResolve requests and responses."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +43,7 @@ class ExecutionResult(BaseModel):
     """Result of executing quantum code inside the sandbox."""
 
     success: bool
+    compiled: Optional[bool] = None
     exit_code: Optional[int] = None
     stdout: str = ""
     stderr: str = ""
@@ -155,9 +156,22 @@ class VerifyRequest(BaseModel):
     framework: Optional[str] = None
 
 
+VerificationState = Literal["VERIFIED", "PARTIALLY_VERIFIED", "FAILED_VERIFICATION", "UNVERIFIED"]
+
+
 class Verification(BaseModel):
+    """The validator's verdict, derived only from executions that happened.
+
+    ``state`` is the honest classification: UNVERIFIED means QResolve could
+    not run or could not judge the correction, and it is never reported as
+    VERIFIED. ``verified`` stays the narrow claim it always was — the patched
+    code executed successfully in the sandbox.
+    """
+
     verified: bool
     execution: ExecutionResult
+    state: VerificationState = "UNVERIFIED"
+    reason: Optional[str] = None
     notes: Optional[str] = None
 
 
