@@ -193,3 +193,20 @@ QResolve is a focused quantum debugging and runtime-validation project. The curr
 If you have only one minute, read the opening principle, then inspect the architecture and verification/testing sections. The project is intentionally documented around **what the system can demonstrate**, not what it is intended to become.
 
 </details>
+
+<details>
+<summary><strong>🧪 Interactive debugging map</strong></summary>
+
+```mermaid
+flowchart LR
+    C[Quantum code + error] --> A[Analyze]
+    A --> D[Diagnose]
+    D --> F[Generate fix]
+    F --> S[Sandbox]
+    S --> V[Validate]
+    V --> O[Evidence-backed outcome]
+```
+
+The solver's central rule is **do not call a fix verified until the runtime provides evidence**.
+
+</details>
