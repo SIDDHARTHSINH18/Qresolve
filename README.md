@@ -1,5 +1,12 @@
 # QResolve — Quantum Runtime Error Solver
 
+<details>
+<summary><strong>⚡ Quick navigation</strong></summary>
+
+**Explore:** [What it is](#what-it-is) · [Architecture](#architecture) · [Capabilities](#current-capabilities) · [Engineering evidence](#engineering-evidence) · [Security](#security-boundary) · [Run locally](#development)
+
+</details>
+
 QResolve is a quantum-computing debugging system focused on a specific problem:
 
 > **Diagnose the failure, propose a correction, execute the corrected program, and report the verification evidence.**
@@ -178,3 +185,11 @@ QResolve is a focused quantum debugging and runtime-validation project. The curr
 ---
 
 **Built with:** Python · FastAPI · Qiskit · Cirq · PennyLane · pytest
+
+
+<details>
+<summary><strong>👀 Reading this repository</strong></summary>
+
+If you have only one minute, read the opening principle, then inspect the architecture and verification/testing sections. The project is intentionally documented around **what the system can demonstrate**, not what it is intended to become.
+
+</details>
